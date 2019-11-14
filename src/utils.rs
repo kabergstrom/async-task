@@ -1,5 +1,5 @@
-use std::alloc::Layout;
-use std::mem;
+use core::alloc::Layout;
+use core::mem;
 
 /// Calls a function and aborts if it panics.
 ///
@@ -10,7 +10,7 @@ pub(crate) fn abort_on_panic<T>(f: impl FnOnce() -> T) -> T {
 
     impl Drop for Bomb {
         fn drop(&mut self) {
-            std::process::abort();
+            fatal("abort_on_panic");
         }
     }
 
@@ -45,4 +45,12 @@ pub(crate) fn padding_needed_for(layout: Layout, align: usize) -> usize {
     let len = layout.size();
     let len_rounded_up = len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1);
     len_rounded_up.wrapping_sub(len)
+}
+
+#[inline]
+pub(crate) fn fatal(_msg: &str) -> ! {
+    #[cfg(feature = "std")]
+    std::process::abort();
+    #[cfg(not(feature = "std"))]
+    panic!(_msg);
 }

@@ -1,9 +1,10 @@
+use core::future::Future;
+use core::marker::{PhantomData, Unpin};
+use core::pin::Pin;
+use core::ptr::NonNull;
+use core::task::{Context, Poll};
+#[cfg(feature = "std")]
 use std::fmt;
-use std::future::Future;
-use std::marker::{PhantomData, Unpin};
-use std::pin::Pin;
-use std::ptr::NonNull;
-use std::task::{Context, Poll};
 
 use crate::header::Header;
 use crate::state::*;
@@ -180,6 +181,7 @@ impl<R, T> Future for JoinHandle<R, T> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<R, T> fmt::Debug for JoinHandle<R, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ptr = self.raw_task.as_ptr();

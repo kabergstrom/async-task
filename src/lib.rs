@@ -95,10 +95,18 @@
 //! [`spawn`]: fn.spawn.html
 //! [`Task`]: struct.Task.html
 //! [`JoinHandle`]: struct.JoinHandle.html
-
-#![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
+#![cfg_attr(not(feature = "std"), no_std)]
+#![warn(missing_docs, rust_2018_idioms)]
+#![cfg_attr(feature = "std", warn(missing_debug_implementations))]
 #![doc(test(attr(deny(rust_2018_idioms, warnings))))]
 #![doc(test(attr(allow(unused_extern_crates, unused_variables))))]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc as alloc_crate;
+#[cfg(not(feature = "std"))]
+use alloc_crate::alloc;
+#[cfg(feature = "std")]
+use std::alloc;
 
 mod header;
 mod join_handle;

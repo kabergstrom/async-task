@@ -1,11 +1,11 @@
-use std::alloc::{self, Layout};
-use std::cell::Cell;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::mem::{self, ManuallyDrop};
-use std::pin::Pin;
-use std::ptr::NonNull;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use crate::alloc::{self, Layout};
+use core::cell::Cell;
+use core::future::Future;
+use core::marker::PhantomData;
+use core::mem::{self, ManuallyDrop};
+use core::pin::Pin;
+use core::ptr::NonNull;
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::header::Header;
 use crate::state::*;
@@ -109,7 +109,7 @@ where
         unsafe {
             // Allocate enough space for the entire task.
             let raw_task = match NonNull::new(alloc::alloc(task_layout.layout) as *mut ()) {
-                None => std::process::abort(),
+                None => crate::utils::fatal("alloc failed"),
                 Some(p) => p,
             };
 
@@ -260,7 +260,7 @@ where
             if *state & (SCHEDULED | RUNNING) == 0 {
                 // If the reference count overflowed, abort.
                 if *state > isize::max_value() as usize {
-                    std::process::abort();
+                    crate::utils::fatal("reference count overflow");
                 }
 
                 // Schedule the task.
@@ -286,7 +286,7 @@ where
 
         // If the reference count overflowed, abort.
         if *state > isize::max_value() as usize {
-            std::process::abort();
+            crate::utils::fatal("reference count overflow");
         }
 
         RawWaker::new(ptr, raw_waker)

@@ -1,9 +1,10 @@
+use core::future::Future;
+use core::marker::PhantomData;
+use core::mem;
+use core::ptr::NonNull;
+use core::task::{Context, RawWaker, RawWakerVTable, Waker};
+#[cfg(feature = "std")]
 use std::fmt;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::mem;
-use std::ptr::NonNull;
-use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::header::Header;
 use crate::raw::RawTask;
@@ -154,9 +155,10 @@ impl<T> Task<T> {
         }
     }
 
+    /// Extract a reference to the currently running task's tag from a &mut core::task::Context
     pub unsafe fn tag_from_context<'a>(ctx: &'a mut Context<'_>) -> &'a T {
         let waker = ctx.waker();
-        let hack = std::mem::transmute::<&Waker, &RawWaker>(waker);
+        let hack = core::mem::transmute::<&Waker, &RawWaker>(waker);
         let hack = &*(hack as *const RawWaker as *const RawWakerHack);
         let offset = Header::offset_tag::<T>();
 
@@ -187,6 +189,7 @@ impl<T> Drop for Task<T> {
     }
 }
 
+#[cfg(feature = "std")]
 impl<T: fmt::Debug> fmt::Debug for Task<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ptr = self.raw_task.as_ptr();
