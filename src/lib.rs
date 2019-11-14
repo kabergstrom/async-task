@@ -97,9 +97,8 @@
 //! [`JoinHandle`]: struct.JoinHandle.html
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs, rust_2018_idioms)]
-#![cfg_attr(feature = "std", warn(missing_debug_implementations))]
 #![doc(test(attr(deny(rust_2018_idioms, warnings))))]
-#![doc(test(attr(allow(unused_extern_crates, unused_variables))))]
+#![doc(test(attr(allow(unused_extern_crates, missing_debug_implementations, unused_variables))))]
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
