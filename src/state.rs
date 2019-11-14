@@ -49,11 +49,6 @@ pub(crate) const HANDLE: usize = 1 << 4;
 /// check that tells us if we need to wake anyone without acquiring the lock inside the task.
 pub(crate) const AWAITER: usize = 1 << 5;
 
-/// Set if the awaiter is locked.
-///
-/// This lock is acquired before a new awaiter is registered or the existing one is woken.
-pub(crate) const LOCKED: usize = 1 << 6;
-
 /// A single reference.
 ///
 /// The lower bits in the state contain various flags representing the task state, while the upper

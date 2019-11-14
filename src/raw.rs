@@ -5,7 +5,6 @@ use std::marker::PhantomData;
 use std::mem::{self, ManuallyDrop};
 use std::pin::Pin;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::header::Header;
@@ -95,10 +94,10 @@ impl<F, R, S, T> Clone for RawTask<F, R, S, T> {
 
 impl<F, R, S, T> RawTask<F, R, S, T>
 where
-    F: Future<Output = R> + Send + 'static,
-    R: Send + 'static,
-    S: Fn(Task<T>) + Send + Sync + 'static,
-    T: Send + 'static,
+    F: Future<Output = R> + 'static,
+    R: 'static,
+    S: Fn(Task<T>) + 'static,
+    T: 'static,
 {
     /// Allocates a task with the given `future` and `schedule` function.
     ///
@@ -118,7 +117,7 @@ where
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
-                state: AtomicUsize::new(SCHEDULED | HANDLE | REFERENCE),
+                state: SCHEDULED | HANDLE | REFERENCE,
                 awaiter: Cell::new(None),
                 vtable: &TaskVTable {
                     raw_waker: RawWakerVTable::new(
@@ -202,60 +201,35 @@ where
     unsafe fn wake(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
 
-        let mut state = (*raw.header).state.load(Ordering::Acquire);
+        let state = &mut (*(raw.header as *mut Header)).state;
 
-        loop {
-            // If the task is completed or closed, it can't be woken.
-            if state & (COMPLETED | CLOSED) != 0 {
+        // If the task is completed or closed, it can't be woken.
+        if *state & (COMPLETED | CLOSED) != 0 {
+            // Drop the waker.
+            Self::decrement(ptr);
+            return;
+        }
+
+        // If the task is already scheduled, we just need to synchronize with the thread that
+        // will run the task by "publishing" our current view of the memory.
+        if *state & SCHEDULED != 0 {
+            // Drop the waker.
+            Self::decrement(ptr);
+        } else {
+            // If the task is not yet scheduled and isn't currently running, now is the
+            // time to schedule it.
+            if *state & (SCHEDULED | RUNNING) == 0 {
+                // Mark the task as scheduled.
+                *state = *state | SCHEDULED;
+                // Schedule the task.
+                let task = Task {
+                    raw_task: NonNull::new_unchecked(ptr as *mut ()),
+                    _marker: PhantomData,
+                };
+                (*raw.schedule)(task);
+            } else {
                 // Drop the waker.
                 Self::decrement(ptr);
-                break;
-            }
-
-            // If the task is already scheduled, we just need to synchronize with the thread that
-            // will run the task by "publishing" our current view of the memory.
-            if state & SCHEDULED != 0 {
-                // Update the state without actually modifying it.
-                match (*raw.header).state.compare_exchange_weak(
-                    state,
-                    state,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        // Drop the waker.
-                        Self::decrement(ptr);
-                        break;
-                    }
-                    Err(s) => state = s,
-                }
-            } else {
-                // Mark the task as scheduled.
-                match (*raw.header).state.compare_exchange_weak(
-                    state,
-                    state | SCHEDULED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        // If the task is not yet scheduled and isn't currently running, now is the
-                        // time to schedule it.
-                        if state & (SCHEDULED | RUNNING) == 0 {
-                            // Schedule the task.
-                            let task = Task {
-                                raw_task: NonNull::new_unchecked(ptr as *mut ()),
-                                _marker: PhantomData,
-                            };
-                            (*raw.schedule)(task);
-                        } else {
-                            // Drop the waker.
-                            Self::decrement(ptr);
-                        }
-
-                        break;
-                    }
-                    Err(s) => state = s,
-                }
             }
         }
     }
@@ -264,63 +238,39 @@ where
     unsafe fn wake_by_ref(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
 
-        let mut state = (*raw.header).state.load(Ordering::Acquire);
+        let state = &mut (*(raw.header as *mut Header)).state;
 
-        loop {
-            // If the task is completed or closed, it can't be woken.
-            if state & (COMPLETED | CLOSED) != 0 {
-                break;
-            }
+        // If the task is completed or closed, it can't be woken.
+        if *state & (COMPLETED | CLOSED) != 0 {
+            return;
+        }
 
-            // If the task is already scheduled, we just need to synchronize with the thread that
-            // will run the task by "publishing" our current view of the memory.
-            if state & SCHEDULED != 0 {
-                // Update the state without actually modifying it.
-                match (*raw.header).state.compare_exchange_weak(
-                    state,
-                    state,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => break,
-                    Err(s) => state = s,
-                }
+        // If the task is already scheduled, we do nothing
+        if *state & SCHEDULED != 0 {
+            return;
+        } else {
+            // If the task is not scheduled nor running, we'll need to schedule after waking.
+            let new = if *state & (SCHEDULED | RUNNING) == 0 {
+                (*state | SCHEDULED) + REFERENCE
             } else {
-                // If the task is not scheduled nor running, we'll need to schedule after waking.
-                let new = if state & (SCHEDULED | RUNNING) == 0 {
-                    (state | SCHEDULED) + REFERENCE
-                } else {
-                    state | SCHEDULED
-                };
+                *state | SCHEDULED
+            };
 
-                // Mark the task as scheduled.
-                match (*raw.header).state.compare_exchange_weak(
-                    state,
-                    new,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        // If the task is not scheduled nor running, now is the time to schedule.
-                        if state & (SCHEDULED | RUNNING) == 0 {
-                            // If the reference count overflowed, abort.
-                            if state > isize::max_value() as usize {
-                                std::process::abort();
-                            }
-
-                            // Schedule the task.
-                            let task = Task {
-                                raw_task: NonNull::new_unchecked(ptr as *mut ()),
-                                _marker: PhantomData,
-                            };
-                            (*raw.schedule)(task);
-                        }
-
-                        break;
-                    }
-                    Err(s) => state = s,
+            // If the task is not scheduled nor running, now is the time to schedule.
+            if *state & (SCHEDULED | RUNNING) == 0 {
+                // If the reference count overflowed, abort.
+                if *state > isize::max_value() as usize {
+                    std::process::abort();
                 }
+
+                // Schedule the task.
+                let task = Task {
+                    raw_task: NonNull::new_unchecked(ptr as *mut ()),
+                    _marker: PhantomData,
+                };
+                (*raw.schedule)(task);
             }
+            *state = new;
         }
     }
 
@@ -328,13 +278,14 @@ where
     unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
         let raw = Self::from_ptr(ptr);
         let raw_waker = &(*raw.header).vtable.raw_waker;
+        let state = &mut (*(raw.header as *mut Header)).state;
 
         // Increment the reference count. With any kind of reference-counted data structure,
         // relaxed ordering is fine when the reference is being cloned.
-        let state = (*raw.header).state.fetch_add(REFERENCE, Ordering::Relaxed);
+        *state += REFERENCE;
 
         // If the reference count overflowed, abort.
-        if state > isize::max_value() as usize {
+        if *state > isize::max_value() as usize {
             std::process::abort();
         }
 
@@ -348,13 +299,14 @@ where
     #[inline]
     unsafe fn decrement(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
+        let state = &mut (*(raw.header as *mut Header)).state;
 
         // Decrement the reference count.
-        let new = (*raw.header).state.fetch_sub(REFERENCE, Ordering::AcqRel) - REFERENCE;
+        *state -= REFERENCE;
 
         // If this was the last reference to the task and the `JoinHandle` has been dropped as
         // well, then destroy the task.
-        if new & !(REFERENCE - 1) == 0 && new & HANDLE == 0 {
+        if *state & !(REFERENCE - 1) == 0 && *state & HANDLE == 0 {
             Self::destroy(ptr);
         }
     }
@@ -425,40 +377,26 @@ where
         )));
         let cx = &mut Context::from_waker(&waker);
 
-        let mut state = (*raw.header).state.load(Ordering::Acquire);
+        let state = &mut (*(raw.header as *mut Header)).state;
 
         // Update the task's state before polling its future.
-        loop {
-            // If the task has been closed, drop the task reference and return.
-            if state & CLOSED != 0 {
-                // Notify the awaiter that the task has been closed.
-                if state & AWAITER != 0 {
-                    (*raw.header).notify();
-                }
-
-                // Drop the future.
-                Self::drop_future(ptr);
-
-                // Drop the task reference.
-                Self::decrement(ptr);
-                return;
+        // If the task has been closed, drop the task reference and return.
+        if *state & CLOSED != 0 {
+            // Notify the awaiter that the task has been closed.
+            if *state & AWAITER != 0 {
+                (*raw.header).notify();
             }
 
-            // Mark the task as unscheduled and running.
-            match (*raw.header).state.compare_exchange_weak(
-                state,
-                (state & !SCHEDULED) | RUNNING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Update the state because we're continuing with polling the future.
-                    state = (state & !SCHEDULED) | RUNNING;
-                    break;
-                }
-                Err(s) => state = s,
-            }
+            // Drop the future.
+            Self::drop_future(ptr);
+
+            // Drop the task reference.
+            Self::decrement(ptr);
+            return;
         }
+
+        // Mark the task as unscheduled and running.
+        *state = (*state & !SCHEDULED) | RUNNING;
 
         // Poll the inner future, but surround it with a guard that closes the task in case polling
         // panics.
@@ -476,86 +414,59 @@ where
                 let mut output = None;
 
                 // The task is now completed.
-                loop {
-                    // If the handle is dropped, we'll need to close it and drop the output.
-                    let new = if state & HANDLE == 0 {
-                        (state & !RUNNING & !SCHEDULED) | COMPLETED | CLOSED
-                    } else {
-                        (state & !RUNNING & !SCHEDULED) | COMPLETED
-                    };
+                // Mark the task as not running and completed.
+                // If the handle is dropped, we'll need to close it and drop the output.
+                *state = if *state & HANDLE == 0 {
+                    (*state & !RUNNING & !SCHEDULED) | COMPLETED | CLOSED
+                } else {
+                    (*state & !RUNNING & !SCHEDULED) | COMPLETED
+                };
 
-                    // Mark the task as not running and completed.
-                    match (*raw.header).state.compare_exchange_weak(
-                        state,
-                        new,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => {
-                            // If the handle is dropped or if the task was closed while running,
-                            // now it's time to drop the output.
-                            if state & HANDLE == 0 || state & CLOSED != 0 {
-                                // Read the output.
-                                output = Some(raw.output.read());
-                            }
-
-                            // Notify the awaiter that the task has been completed.
-                            if state & AWAITER != 0 {
-                                (*raw.header).notify();
-                            }
-
-                            // Drop the task reference.
-                            Self::decrement(ptr);
-                            break;
-                        }
-                        Err(s) => state = s,
-                    }
+                // If the handle is dropped or if the task was closed while running,
+                // now it's time to drop the output.
+                if *state & HANDLE == 0 || *state & CLOSED != 0 {
+                    // Read the output.
+                    output = Some(raw.output.read());
                 }
+
+                // Notify the awaiter that the task has been completed.
+                if *state & AWAITER != 0 {
+                    (*raw.header).notify();
+                }
+
+                // Drop the task reference.
+                Self::decrement(ptr);
 
                 // Drop the output if it was taken out of the task.
                 drop(output);
             }
             Poll::Pending => {
                 // The task is still not completed.
-                loop {
-                    // If the task was closed while running, we'll need to unschedule in case it
-                    // was woken and then clean up its resources.
-                    let new = if state & CLOSED != 0 {
-                        state & !RUNNING & !SCHEDULED
-                    } else {
-                        state & !RUNNING
-                    };
+                // If the task was closed while running, we'll need to unschedule in case it
+                // was woken and then clean up its resources.
+                *state = if *state & CLOSED != 0 {
+                    *state & !RUNNING & !SCHEDULED
+                } else {
+                    *state & !RUNNING
+                };
 
-                    // Mark the task as not running.
-                    match (*raw.header).state.compare_exchange_weak(
-                        state,
-                        new,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(state) => {
-                            // If the task was closed while running, we need to drop its future.
-                            // If the task was woken while running, we need to schedule it.
-                            // Otherwise, we just drop the task reference.
-                            if state & CLOSED != 0 {
-                                // The thread that closed the task didn't drop the future because
-                                // it was running so now it's our responsibility to do so.
-                                Self::drop_future(ptr);
+                // If the task was closed while running, we need to drop its future.
+                // If the task was woken while running, we need to schedule it.
+                // Otherwise, we just drop the task reference.
+                if *state & CLOSED != 0 {
+                    // The thread that closed the task didn't drop the future because
+                    // it was running so now it's our responsibility to do so.
+                    Self::drop_future(ptr);
 
-                                // Drop the task reference.
-                                Self::decrement(ptr);
-                            } else if state & SCHEDULED != 0 {
-                                // The thread that has woken the task didn't reschedule it because
-                                // it was running so now it's our responsibility to do so.
-                                Self::schedule(ptr);
-                            } else {
-                                // Drop the task reference.
-                                Self::decrement(ptr);
-                            }
-                            break;
-                        }
-                        Err(s) => state = s,
-                    }
+                    // Drop the task reference.
+                    Self::decrement(ptr);
+                } else if *state & SCHEDULED != 0 {
+                    // The thread that has woken the task didn't reschedule it because
+                    // it was running so now it's our responsibility to do so.
+                    Self::schedule(ptr);
+                } else {
+                    // Drop the task reference.
+                    Self::decrement(ptr);
                 }
             }
         }
@@ -563,65 +474,54 @@ where
         /// A guard that closes the task if polling its future panics.
         struct Guard<F, R, S, T>(RawTask<F, R, S, T>)
         where
-            F: Future<Output = R> + Send + 'static,
-            R: Send + 'static,
-            S: Fn(Task<T>) + Send + Sync + 'static,
-            T: Send + 'static;
+            F: Future<Output = R> + 'static,
+            R: 'static,
+            S: Fn(Task<T>) + 'static,
+            T: 'static;
 
         impl<F, R, S, T> Drop for Guard<F, R, S, T>
         where
-            F: Future<Output = R> + Send + 'static,
-            R: Send + 'static,
-            S: Fn(Task<T>) + Send + Sync + 'static,
-            T: Send + 'static,
+            F: Future<Output = R> + 'static,
+            R: 'static,
+            S: Fn(Task<T>) + 'static,
+            T: 'static,
         {
             fn drop(&mut self) {
                 let raw = self.0;
                 let ptr = raw.header as *const ();
 
                 unsafe {
-                    let mut state = (*raw.header).state.load(Ordering::Acquire);
+                    let state = &mut (*(raw.header as *mut Header)).state;
 
-                    loop {
-                        // If the task was closed while running, then unschedule it, drop its
-                        // future, and drop the task reference.
-                        if state & CLOSED != 0 {
-                            // We still need to unschedule the task because it is possible it was
-                            // woken while running.
-                            (*raw.header).state.fetch_and(!SCHEDULED, Ordering::AcqRel);
+                    // If the task was closed while running, then unschedule it, drop its
+                    // future, and drop the task reference.
+                    if *state & CLOSED != 0 {
+                        // We still need to unschedule the task because it is possible it was
+                        // woken while running.
+                        *state &= !SCHEDULED;
 
-                            // The thread that closed the task didn't drop the future because it
-                            // was running so now it's our responsibility to do so.
-                            RawTask::<F, R, S, T>::drop_future(ptr);
+                        // The thread that closed the task didn't drop the future because it
+                        // was running so now it's our responsibility to do so.
+                        RawTask::<F, R, S, T>::drop_future(ptr);
 
-                            // Drop the task reference.
-                            RawTask::<F, R, S, T>::decrement(ptr);
-                            break;
-                        }
-
-                        // Mark the task as not running, not scheduled, and closed.
-                        match (*raw.header).state.compare_exchange_weak(
-                            state,
-                            (state & !RUNNING & !SCHEDULED) | CLOSED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(state) => {
-                                // Drop the future because the task is now closed.
-                                RawTask::<F, R, S, T>::drop_future(ptr);
-
-                                // Notify the awaiter that the task has been closed.
-                                if state & AWAITER != 0 {
-                                    (*raw.header).notify();
-                                }
-
-                                // Drop the task reference.
-                                RawTask::<F, R, S, T>::decrement(ptr);
-                                break;
-                            }
-                            Err(s) => state = s,
-                        }
+                        // Drop the task reference.
+                        RawTask::<F, R, S, T>::decrement(ptr);
+                        return;
                     }
+
+                    // Mark the task as not running, not scheduled, and closed.
+
+                    *state = (*state & !RUNNING & !SCHEDULED) | CLOSED;
+                    // Drop the future because the task is now closed.
+                    RawTask::<F, R, S, T>::drop_future(ptr);
+
+                    // Notify the awaiter that the task has been closed.
+                    if *state & AWAITER != 0 {
+                        (*raw.header).notify();
+                    }
+
+                    // Drop the task reference.
+                    RawTask::<F, R, S, T>::decrement(ptr);
                 }
             }
         }
