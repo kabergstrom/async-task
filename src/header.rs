@@ -1,8 +1,7 @@
+use crate::alloc::fmt;
 use core::alloc::Layout;
 use core::cell::Cell;
 use core::task::Waker;
-#[cfg(feature = "std")]
-use std::fmt;
 
 use crate::raw::TaskVTable;
 use crate::state::*;
@@ -110,7 +109,6 @@ impl Header {
     }
 }
 
-#[cfg(feature = "std")]
 impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state;

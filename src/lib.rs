@@ -102,11 +102,9 @@
 #![doc(test(attr(allow(unused_extern_crates, unused_variables))))]
 
 #[cfg(not(feature = "std"))]
-extern crate alloc as alloc_crate;
-#[cfg(not(feature = "std"))]
-use alloc_crate::alloc;
+extern crate alloc;
 #[cfg(feature = "std")]
-use std::alloc;
+use std as alloc;
 
 mod header;
 mod join_handle;

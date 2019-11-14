@@ -1,10 +1,9 @@
+use crate::alloc::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::mem;
 use core::ptr::NonNull;
 use core::task::{Context, RawWaker, RawWakerVTable, Waker};
-#[cfg(feature = "std")]
-use std::fmt;
 
 use crate::header::Header;
 use crate::raw::RawTask;
@@ -189,7 +188,6 @@ impl<T> Drop for Task<T> {
     }
 }
 
-#[cfg(feature = "std")]
 impl<T: fmt::Debug> fmt::Debug for Task<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ptr = self.raw_task.as_ptr();

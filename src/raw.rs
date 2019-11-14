@@ -1,4 +1,4 @@
-use crate::alloc::{self, Layout};
+use crate::alloc::alloc::{self, Layout};
 use core::cell::Cell;
 use core::future::Future;
 use core::marker::PhantomData;
