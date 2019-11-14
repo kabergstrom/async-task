@@ -3,6 +3,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::mem;
 use std::ptr::NonNull;
+use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::header::Header;
 use crate::raw::RawTask;
@@ -152,6 +153,20 @@ impl<T> Task<T> {
             &*raw
         }
     }
+
+    pub unsafe fn tag_from_context<'a>(ctx: &'a mut Context<'_>) -> &'a T {
+        let waker = ctx.waker();
+        let hack = std::mem::transmute::<&Waker, &RawWaker>(waker);
+        let hack = &*(hack as *const RawWaker as *const RawWakerHack);
+        let offset = Header::offset_tag::<T>();
+
+        let raw = (hack.data as *mut u8).add(offset) as *const T;
+        &*raw
+    }
+}
+struct RawWakerHack {
+    data: *const (),
+    _vtable: &'static RawWakerVTable,
 }
 
 impl<T> Drop for Task<T> {
