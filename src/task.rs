@@ -164,6 +164,19 @@ impl<T> Task<T> {
         let raw = (hack.data as *mut u8).add(offset) as *const T;
         &*raw
     }
+
+    #[doc(hidden)]
+    pub unsafe fn into_raw(self) -> NonNull<()> {
+        self.raw_task
+    }
+
+    #[doc(hidden)]
+    pub unsafe fn from_raw(ptr: NonNull<()>) -> Self {
+        Self {
+            raw_task: ptr,
+            _marker: PhantomData,
+        }
+    }
 }
 struct RawWakerHack {
     data: *const (),
